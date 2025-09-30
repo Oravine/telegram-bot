@@ -6,7 +6,8 @@ from telegram import (
     InlineKeyboardButton, 
     InlineKeyboardMarkup,
     InputMediaPhoto,
-    InputMediaVideo
+    InputMediaVideo,
+    InputMediaDocument
 )
 from telegram.ext import (
     Application, 
@@ -149,6 +150,36 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         video=message_data['file_id'],
                         caption=message_data['text']
                     )
+                elif message_data['type'] == 'single_document':
+                    await context.bot.send_document(
+                        chat_id=CHANNEL_ID,
+                        document=message_data['file_id'],
+                        caption=message_data['text']
+                    )
+                elif message_data['type'] == 'voice':
+                    # Для голосового сначала отправляем голосовое
+                    await context.bot.send_voice(
+                        chat_id=CHANNEL_ID,
+                        voice=message_data['file_id']
+                    )
+                    # Затем отправляем подпись отдельным сообщением
+                    if message_data['text']:
+                        await context.bot.send_message(
+                            chat_id=CHANNEL_ID,
+                            text=message_data['text']
+                        )
+                elif message_data['type'] == 'video_note':
+                    # Для видеосообщения сначала отправляем видеосообщение
+                    await context.bot.send_video_note(
+                        chat_id=CHANNEL_ID,
+                        video_note=message_data['file_id']
+                    )
+                    # Затем отправляем подпись отдельным сообщением
+                    if message_data['text']:
+                        await context.bot.send_message(
+                            chat_id=CHANNEL_ID,
+                            text=message_data['text']
+                        )
                 elif message_data['type'] == 'media_group':
                     # Отправляем группу медиа с подписью к первому элементу
                     media_with_caption = message_data['media'].copy()
@@ -162,6 +193,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             )
                         elif isinstance(first_media, InputMediaVideo):
                             media_with_caption[0] = InputMediaVideo(
+                                media=first_media.media,
+                                caption=message_data['text']
+                            )
+                        elif isinstance(first_media, InputMediaDocument):
+                            media_with_caption[0] = InputMediaDocument(
                                 media=first_media.media,
                                 caption=message_data['text']
                             )
@@ -213,6 +249,27 @@ async def handle_single_media(update: Update, context: ContextTypes.DEFAULT_TYPE
             video=message_data['file_id'],
             caption=final_text
         )
+    elif message_data['type'] == 'single_document':
+        await update.message.reply_document(
+            document=message_data['file_id'],
+            caption=final_text
+        )
+    elif message_data['type'] == 'voice':
+        # Для голосового отправляем сначала голосовое
+        await update.message.reply_voice(
+            voice=message_data['file_id']
+        )
+        # Затем отправляем подпись отдельным сообщением
+        if final_text.strip():
+            await update.message.reply_text(f"Подпись к голосовому сообщению:\n\n{final_text}")
+    elif message_data['type'] == 'video_note':
+        # Для видеосообщения отправляем сначала видеосообщение
+        await update.message.reply_video_note(
+            video_note=message_data['file_id']
+        )
+        # Затем отправляем подпись отдельным сообщением
+        if final_text.strip():
+            await update.message.reply_text(f"Подпись к видеосообщению:\n\n{final_text}")
 
 async def process_media_group(media_group_id: str, context: ContextTypes.DEFAULT_TYPE):
     """Обрабатывает собранную группу медиа"""
@@ -250,6 +307,18 @@ async def process_media_group(media_group_id: str, context: ContextTypes.DEFAULT
                     video=first_media.media,
                     caption=group_data['caption']
                 )
+            elif isinstance(first_media, InputMediaDocument):
+                context.user_data['message_to_send'] = {
+                    'type': 'single_document',
+                    'file_id': first_media.media,
+                    'text': group_data['caption']
+                }
+                # Отправляем предпросмотр одиночного документа
+                await context.bot.send_document(
+                    chat_id=group_data['chat_id'],
+                    document=first_media.media,
+                    caption=group_data['caption']
+                )
         del media_groups[media_group_id]
         return
     
@@ -273,6 +342,11 @@ async def process_media_group(media_group_id: str, context: ContextTypes.DEFAULT
                 )
             elif isinstance(first_media, InputMediaVideo):
                 preview_media[0] = InputMediaVideo(
+                    media=first_media.media,
+                    caption=group_data['caption']
+                )
+            elif isinstance(first_media, InputMediaDocument):
+                preview_media[0] = InputMediaDocument(
                     media=first_media.media,
                     caption=group_data['caption']
                 )
@@ -353,6 +427,16 @@ async def handle_media_group(update: Update, context: ContextTypes.DEFAULT_TYPE,
             media_groups[media_group_id]['media'].append(
                 InputMediaVideo(media=update.message.video.file_id)
             )
+    elif update.message.document:
+        # Проверяем, нет ли уже этого медиа в группе
+        media_exists = any(
+            isinstance(media, InputMediaDocument) and media.media == update.message.document.file_id 
+            for media in media_groups[media_group_id]['media']
+        )
+        if not media_exists:
+            media_groups[media_group_id]['media'].append(
+                InputMediaDocument(media=update.message.document.file_id)
+            )
     
     # Сохраняем подпись (берем из первого сообщения с подписью)
     if update.message.caption and not media_groups[media_group_id]['caption']:
@@ -420,9 +504,57 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'file_id': message.video.file_id
         }
         await handle_single_media(update, context, context.user_data['message_to_send'])
+        
+    elif message.document:
+        # Файл (документ)
+        context.user_data['message_to_send'] = {
+            'type': 'single_document',
+            'file_id': message.document.file_id
+        }
+        await handle_single_media(update, context, context.user_data['message_to_send'])
+        
+    elif message.voice:
+        # Голосовое сообщение
+        context.user_data['message_to_send'] = {
+            'type': 'voice',
+            'file_id': message.voice.file_id
+        }
+        await handle_single_media(update, context, context.user_data['message_to_send'])
+        
+    elif message.video_note:
+        # Видеосообщение (кружок)
+        context.user_data['message_to_send'] = {
+            'type': 'video_note',
+            'file_id': message.video_note.file_id
+        }
+        await handle_single_media(update, context, context.user_data['message_to_send'])
     
-    # Для одиночных сообщений отправляем подтверждение
-    if not message.media_group_id:
+    # Для одиночных сообщений отправляем подтверждение (кроме голосовых и видеосообщений, у них уже есть подпись)
+    if not message.media_group_id and message.content_type not in ['voice', 'video_note']:
+        keyboard = [
+            [
+                InlineKeyboardButton("Отправить", callback_data="confirm_send"),
+                InlineKeyboardButton("Отмена", callback_data="cancel_confirm")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        confirmation_message = await message.reply_text(
+            "Подтвердите отправку",
+            reply_markup=reply_markup
+        )
+        
+        # Устанавливаем таймер на 30 секунд
+        context.user_data['confirmation_message_id'] = confirmation_message.message_id
+        context.user_data['confirmation_chat_id'] = confirmation_message.chat_id
+        
+        asyncio.create_task(delete_after_timeout(context, 30))
+    
+    # Для голосовых и видеосообщений отправляем подтверждение после подписи
+    elif not message.media_group_id and message.content_type in ['voice', 'video_note']:
+        # Ждем немного чтобы подпись успела отправиться
+        await asyncio.sleep(1)
+        
         keyboard = [
             [
                 InlineKeyboardButton("Отправить", callback_data="confirm_send"),
