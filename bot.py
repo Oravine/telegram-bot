@@ -158,27 +158,29 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 elif message_data['type'] == 'voice':
                     # Для голосового сначала отправляем голосовое
-                    await context.bot.send_voice(
+                    voice_message = await context.bot.send_voice(
                         chat_id=CHANNEL_ID,
                         voice=message_data['file_id']
                     )
-                    # Затем отправляем подпись отдельным сообщением
+                    # Затем отправляем подпись в ответ на голосовое сообщение в канале
                     if message_data['text']:
                         await context.bot.send_message(
                             chat_id=CHANNEL_ID,
-                            text=message_data['text']
+                            text=message_data['text'],
+                            reply_to_message_id=voice_message.message_id
                         )
                 elif message_data['type'] == 'video_note':
                     # Для видеосообщения сначала отправляем видеосообщение
-                    await context.bot.send_video_note(
+                    video_note_message = await context.bot.send_video_note(
                         chat_id=CHANNEL_ID,
                         video_note=message_data['file_id']
                     )
-                    # Затем отправляем подпись отдельным сообщением
+                    # Затем отправляем подпись в ответ на видеосообщение в канале
                     if message_data['text']:
                         await context.bot.send_message(
                             chat_id=CHANNEL_ID,
-                            text=message_data['text']
+                            text=message_data['text'],
+                            reply_to_message_id=video_note_message.message_id
                         )
                 elif message_data['type'] == 'media_group':
                     # Отправляем группу медиа с подписью к первому элементу
