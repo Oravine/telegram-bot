@@ -214,53 +214,46 @@ async def handle_single_media(update: Update, context: ContextTypes.DEFAULT_TYPE
             caption=final_text
         )
 
-async def handle_media_group(update: Update, context: ContextTypes.DEFAULT_TYPE, media_group_id: str):
-    """Обработка группы медиа"""
-    user_id = context.user_data.get('bot_user_id')
-    footer_text = f"\n\n(Подслушано 1699)[https://Pod1699.t.me] | Сообщение отправлено пользователем [ID: {user_id}]"
-    
-    # Инициализируем группу, если ее еще нет
+async def process_media_group(media_group_id: str, context: ContextTypes.DEFAULT_TYPE):
+    """Обрабатывает собранную группу медиа"""
     if media_group_id not in media_groups:
-        media_groups[media_group_id] = {
-            'media': [],
-            'caption': '',
-            'user_id': user_id,
-            'chat_id': update.message.chat_id,
-            'processed': False
-        }
-    
-    # Добавляем медиа в группу
-    if update.message.photo:
-        photo = update.message.photo[-1]
-        media_groups[media_group_id]['media'].append(
-            InputMediaPhoto(media=photo.file_id)
-        )
-    elif update.message.video:
-        media_groups[media_group_id]['media'].append(
-            InputMediaVideo(media=update.message.video.file_id)
-        )
-    
-    # Сохраняем подпись (берем из первого сообщения с подписью)
-    if update.message.caption and not media_groups[media_group_id]['caption']:
-        media_groups[media_group_id]['caption'] = update.message.caption + footer_text
-    
-    # Если подписи нет, но есть медиа, добавляем только footer
-    if not media_groups[media_group_id]['caption'] and media_groups[media_group_id]['media']:
-        media_groups[media_group_id]['caption'] = footer_text.strip()
-    
-    # Ждем 2 секунды, чтобы собрать все медиа группы
-    await asyncio.sleep(2)
-    
-    # Проверяем, не обработали ли мы уже эту группу
-    if media_groups[media_group_id]['processed']:
         return
-    
-    # Помечаем группу как обработанную
-    media_groups[media_group_id]['processed'] = True
     
     group_data = media_groups[media_group_id]
     
-    # Подготавливаем данные для отправки
+    # Проверяем, что у нас есть хотя бы 2 медиа для группы
+    if len(group_data['media']) < 2:
+        # Если только одно медиа, обрабатываем как одиночное
+        if group_data['media']:
+            first_media = group_data['media'][0]
+            if isinstance(first_media, InputMediaPhoto):
+                context.user_data['message_to_send'] = {
+                    'type': 'single_photo',
+                    'file_id': first_media.media,
+                    'text': group_data['caption']
+                }
+                # Отправляем предпросмотр одиночного фото
+                await context.bot.send_photo(
+                    chat_id=group_data['chat_id'],
+                    photo=first_media.media,
+                    caption=group_data['caption']
+                )
+            elif isinstance(first_media, InputMediaVideo):
+                context.user_data['message_to_send'] = {
+                    'type': 'single_video',
+                    'file_id': first_media.media,
+                    'text': group_data['caption']
+                }
+                # Отправляем предпросмотр одиночного видео
+                await context.bot.send_video(
+                    chat_id=group_data['chat_id'],
+                    video=first_media.media,
+                    caption=group_data['caption']
+                )
+        del media_groups[media_group_id]
+        return
+    
+    # Подготавливаем данные для отправки группы медиа
     context.user_data['message_to_send'] = {
         'type': 'media_group',
         'media': group_data['media'],
@@ -311,12 +304,77 @@ async def handle_media_group(update: Update, context: ContextTypes.DEFAULT_TYPE,
         asyncio.create_task(delete_after_timeout(context, 30))
         
     except Exception as e:
-        await update.message.reply_text(f"Ошибка при создании предпросмотра: {str(e)}")
+        await context.bot.send_message(
+            chat_id=group_data['chat_id'],
+            text=f"Ошибка при создании предпросмотра: {str(e)}"
+        )
     
-    # Удаляем группу из временного хранилища через 10 секунд
-    await asyncio.sleep(10)
-    if media_group_id in media_groups:
-        del media_groups[media_group_id]
+    # Удаляем группу из временного хранилища
+    del media_groups[media_group_id]
+
+async def handle_media_group(update: Update, context: ContextTypes.DEFAULT_TYPE, media_group_id: str):
+    """Обработка группы медиа"""
+    user_id = context.user_data.get('bot_user_id')
+    footer_text = f"\n\n(Подслушано 1699)[https://Pod1699.t.me] | Сообщение отправлено пользователем [ID: {user_id}]"
+    
+    # Инициализируем группу, если ее еще нет
+    if media_group_id not in media_groups:
+        media_groups[media_group_id] = {
+            'media': [],
+            'caption': '',
+            'user_id': user_id,
+            'chat_id': update.message.chat_id,
+            'last_update': asyncio.get_event_loop().time(),
+            'task': None
+        }
+    
+    # Обновляем время последнего обновления
+    media_groups[media_group_id]['last_update'] = asyncio.get_event_loop().time()
+    
+    # Добавляем медиа в группу
+    if update.message.photo:
+        photo = update.message.photo[-1]
+        # Проверяем, нет ли уже этого медиа в группе
+        media_exists = any(
+            isinstance(media, InputMediaPhoto) and media.media == photo.file_id 
+            for media in media_groups[media_group_id]['media']
+        )
+        if not media_exists:
+            media_groups[media_group_id]['media'].append(
+                InputMediaPhoto(media=photo.file_id)
+            )
+    elif update.message.video:
+        # Проверяем, нет ли уже этого медиа в группе
+        media_exists = any(
+            isinstance(media, InputMediaVideo) and media.media == update.message.video.file_id 
+            for media in media_groups[media_group_id]['media']
+        )
+        if not media_exists:
+            media_groups[media_group_id]['media'].append(
+                InputMediaVideo(media=update.message.video.file_id)
+            )
+    
+    # Сохраняем подпись (берем из первого сообщения с подписью)
+    if update.message.caption and not media_groups[media_group_id]['caption']:
+        media_groups[media_group_id]['caption'] = update.message.caption + footer_text
+    
+    # Если подписи нет, но есть медиа, добавляем только footer
+    if not media_groups[media_group_id]['caption'] and media_groups[media_group_id]['media']:
+        media_groups[media_group_id]['caption'] = footer_text.strip()
+    
+    # Отменяем предыдущую задачу обработки, если она есть
+    if media_groups[media_group_id]['task']:
+        media_groups[media_group_id]['task'].cancel()
+    
+    # Создаем новую задачу для обработки группы через 1.5 секунды
+    media_groups[media_group_id]['task'] = asyncio.create_task(
+        delayed_process_media_group(media_group_id, context, 1.5)
+    )
+
+async def delayed_process_media_group(media_group_id: str, context: ContextTypes.DEFAULT_TYPE, delay: float):
+    """Отложенная обработка группы медиа"""
+    await asyncio.sleep(delay)
+    await process_media_group(media_group_id, context)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик сообщений от пользователя"""
