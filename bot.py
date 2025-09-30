@@ -1,6 +1,7 @@
 import os
 import asyncio
 import sqlite3
+from datetime import datetime, timedelta
 from telegram import (
     Update, 
     InlineKeyboardButton, 
@@ -40,6 +41,14 @@ def init_db():
             username TEXT
         )
     ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS bans (
+            user_id INTEGER PRIMARY KEY,
+            ban_until TIMESTAMP,
+            reason TEXT,
+            FOREIGN KEY (user_id) REFERENCES users (id)
+        )
+    ''')
     conn.commit()
     conn.close()
 
@@ -76,6 +85,84 @@ def get_all_users():
     conn.close()
     return users
 
+def is_user_banned(user_id: int) -> tuple:
+    """Проверяет, забанен ли пользователь. Возвращает (забанен_ли, время_окончания, причина)"""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT ban_until, reason FROM bans WHERE user_id = ?", (user_id,))
+    result = cursor.fetchone()
+    conn.close()
+    
+    if not result:
+        return False, None, None
+    
+    ban_until, reason = result
+    
+    # Если бан вечный (ban_until is None)
+    if ban_until is None:
+        return True, None, reason
+    
+    # Проверяем, не истек ли срок бана
+    ban_until_dt = datetime.fromisoformat(ban_until)
+    if datetime.now() > ban_until_dt:
+        # Удаляем истекший бан
+        remove_ban(user_id)
+        return False, None, None
+    
+    return True, ban_until_dt, reason
+
+def add_ban(user_id: int, hours: float, reason: str = None):
+    """Добавляет бан пользователю"""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    
+    if hours == float('inf'):  # Вечный бан
+        ban_until = None
+    else:
+        ban_until = datetime.now() + timedelta(hours=hours)
+    
+    cursor.execute(
+        "INSERT OR REPLACE INTO bans (user_id, ban_until, reason) VALUES (?, ?, ?)",
+        (user_id, ban_until.isoformat() if ban_until else None, reason)
+    )
+    conn.commit()
+    conn.close()
+
+def remove_ban(user_id: int):
+    """Снимает бан с пользователя"""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM bans WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+
+def get_ban_list():
+    """Получает список всех активных банов"""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT b.user_id, b.ban_until, b.reason, u.tg_id, u.username 
+        FROM bans b 
+        JOIN users u ON b.user_id = u.id
+    ''')
+    bans = cursor.fetchall()
+    conn.close()
+    
+    # Фильтруем истекшие баны
+    active_bans = []
+    for ban in bans:
+        user_id, ban_until, reason, tg_id, username = ban
+        if ban_until is None:  # Вечный бан
+            active_bans.append(ban)
+        else:
+            ban_until_dt = datetime.fromisoformat(ban_until)
+            if datetime.now() <= ban_until_dt:
+                active_bans.append(ban)
+            else:
+                remove_ban(user_id)
+    
+    return active_bans
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /start"""
     user = update.effective_user
@@ -104,6 +191,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     if query.data == "send_message":
+        # Проверяем, не забанен ли пользователь
+        user_id = context.user_data.get('bot_user_id')
+        if user_id:
+            banned, ban_until, reason = is_user_banned(user_id)
+            if banned:
+                await query.edit_message_text(
+                    "Вы заблокированы и не можете отправить сообщения. Для получения справки напишите /baninfo."
+                )
+                return
+        
         # Пользователь нажал "Отправить сообщение"
         keyboard = [
             [InlineKeyboardButton("Отмена", callback_data="cancel_send")]
@@ -128,6 +225,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop('waiting_for_message', None)
         
     elif query.data == "confirm_send":
+        # Проверяем, не забанен ли пользователь
+        user_id = context.user_data.get('bot_user_id')
+        if user_id:
+            banned, ban_until, reason = is_user_banned(user_id)
+            if banned:
+                await query.edit_message_text(
+                    "Вы заблокированы и не можете отправить сообщения. Для получения справки напишите /baninfo."
+                )
+                context.user_data.pop('message_to_send', None)
+                context.user_data.pop('waiting_for_message', None)
+                return
+        
         # Пользователь подтвердил отправку
         message_data = context.user_data.get('message_to_send')
         if message_data:
@@ -567,6 +676,173 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await asyncio.sleep(0.5)
         await send_confirmation(update, context)
 
+# Команды для банов
+async def ban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /ban для блокировки пользователя"""
+    user = update.effective_user
+    
+    # Проверяем, является ли пользователь администратором
+    if user.id != ADMIN_ID:
+        return  # Игнорируем команду от не-админа
+    
+    if not context.args:
+        await update.message.reply_text("Использование: /ban [ID пользователя] [время в часах или x для вечного бана] [причина]")
+        return
+    
+    if len(context.args) < 2:
+        await update.message.reply_text("Использование: /ban [ID пользователя] [время в часах или x для вечного бана] [причина]")
+        return
+    
+    try:
+        user_id = int(context.args[0])
+        time_arg = context.args[1].lower()
+        
+        if time_arg == 'x':
+            hours = float('inf')  # Вечный бан
+        else:
+            hours = float(time_arg)
+        
+        # Получаем причину (все оставшиеся аргументы)
+        reason = ' '.join(context.args[2:]) if len(context.args) > 2 else None
+        
+        # Проверяем существование пользователя
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM users WHERE id = ?", (user_id,))
+        user_exists = cursor.fetchone()
+        conn.close()
+        
+        if not user_exists:
+            await update.message.reply_text(f"Пользователь с ID {user_id} не найден.")
+            return
+        
+        # Добавляем бан
+        add_ban(user_id, hours, reason)
+        
+        if hours == float('inf'):
+            time_text = "Вечная"
+        else:
+            time_text = f"{hours} часов"
+        
+        reason_text = reason if reason else "Не указана"
+        
+        await update.message.reply_text(
+            f"Пользователь [ID: {user_id}] заблокирован.\n"
+            f"Время: {time_text}\n"
+            f"Причина: {reason_text}"
+        )
+        
+    except ValueError:
+        await update.message.reply_text("Ошибка: ID пользователя должен быть числом, а время - числом или 'x' для вечного бана.")
+
+async def unban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /unban для разблокировки пользователя"""
+    user = update.effective_user
+    
+    # Проверяем, является ли пользователь администратором
+    if user.id != ADMIN_ID:
+        return  # Игнорируем команду от не-админа
+    
+    if not context.args or len(context.args) != 1:
+        await update.message.reply_text("Использование: /unban [ID пользователя]")
+        return
+    
+    try:
+        user_id = int(context.args[0])
+        
+        # Проверяем существование пользователя
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM users WHERE id = ?", (user_id,))
+        user_exists = cursor.fetchone()
+        conn.close()
+        
+        if not user_exists:
+            await update.message.reply_text(f"Пользователь с ID {user_id} не найден.")
+            return
+        
+        # Проверяем, забанен ли пользователь
+        banned, _, _ = is_user_banned(user_id)
+        if not banned:
+            await update.message.reply_text(f"Пользователь [ID: {user_id}] не заблокирован.")
+            return
+        
+        # Снимаем бан
+        remove_ban(user_id)
+        await update.message.reply_text(f"Пользователь [ID: {user_id}] разблокирован.")
+        
+    except ValueError:
+        await update.message.reply_text("Ошибка: ID пользователя должен быть числом.")
+
+async def baninfo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /baninfo для проверки статуса блокировки"""
+    user = update.effective_user
+    
+    # Получаем ID пользователя в боте
+    user_id = get_or_create_user(user.id, user.username)
+    
+    # Проверяем бан
+    banned, ban_until, reason = is_user_banned(user_id)
+    
+    if not banned:
+        await update.message.reply_text("Вы не заблокированы.")
+        return
+    
+    if ban_until is None:
+        time_text = "Вечная"
+    else:
+        time_left = ban_until - datetime.now()
+        hours_left = int(time_left.total_seconds() / 3600)
+        minutes_left = int((time_left.total_seconds() % 3600) / 60)
+        
+        if hours_left > 0:
+            time_text = f"{hours_left} часов {minutes_left} минут"
+        else:
+            time_text = f"{minutes_left} минут"
+    
+    reason_text = reason if reason else "Не указана"
+    
+    await update.message.reply_text(
+        f"Вы заблокированы.\n"
+        f"Закончится через: {time_text}\n"
+        f"Причина: {reason_text}"
+    )
+
+async def banlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /banlist для просмотра списка заблокированных"""
+    user = update.effective_user
+    
+    # Проверяем, является ли пользователь администратором
+    if user.id != ADMIN_ID:
+        return  # Игнорируем команду от не-админа
+    
+    bans = get_ban_list()
+    
+    if not bans:
+        await update.message.reply_text("Нет активных блокировок.")
+        return
+    
+    ban_list_text = ""
+    for i, ban in enumerate(bans):
+        user_id, ban_until, reason, tg_id, username = ban
+        
+        if ban_until is None:
+            time_text = "Бессрочно"
+        else:
+            ban_until_dt = datetime.fromisoformat(ban_until)
+            time_left = ban_until_dt - datetime.now()
+            hours_left = int(time_left.total_seconds() / 3600)
+            time_text = f"{hours_left} часов"
+        
+        reason_text = reason if reason else "Не указана"
+        
+        ban_list_text += f"{user_id}\n{time_text}\n{reason_text}"
+        
+        if i < len(bans) - 1:
+            ban_list_text += "\n\n"
+    
+    await update.message.reply_text(ban_list_text)
+
 async def take_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /takedb для администратора"""
     user = update.effective_user
@@ -604,6 +880,10 @@ def main():
     # Добавляем обработчики
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("takedb", take_db))
+    application.add_handler(CommandHandler("ban", ban_command))
+    application.add_handler(CommandHandler("unban", unban_command))
+    application.add_handler(CommandHandler("baninfo", baninfo_command))
+    application.add_handler(CommandHandler("banlist", banlist_command))
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.ALL, handle_message))
     
