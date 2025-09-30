@@ -226,6 +226,28 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop('message_to_send', None)
         context.user_data.pop('waiting_for_message', None)
 
+async def send_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отправляет сообщение с подтверждением"""
+    keyboard = [
+        [
+            InlineKeyboardButton("Отправить", callback_data="confirm_send"),
+            InlineKeyboardButton("Отмена", callback_data="cancel_confirm")
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    confirmation_message = await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text="Подтвердите отправку",
+        reply_markup=reply_markup
+    )
+    
+    # Устанавливаем таймер на 30 секунд
+    context.user_data['confirmation_message_id'] = confirmation_message.message_id
+    context.user_data['confirmation_chat_id'] = confirmation_message.chat_id
+    
+    asyncio.create_task(delete_after_timeout(context, 30))
+
 async def handle_single_media(update: Update, context: ContextTypes.DEFAULT_TYPE, message_data: dict):
     """Обработка одиночного медиа"""
     user_id = context.user_data.get('bot_user_id')
@@ -259,17 +281,17 @@ async def handle_single_media(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_voice(
             voice=message_data['file_id']
         )
-        # Затем отправляем подпись отдельным сообщением
+        # Затем отправляем подпись отдельным сообщением (просто текст без лишних слов)
         if final_text.strip():
-            await update.message.reply_text(f"Подпись к голосовому сообщению:\n\n{final_text}")
+            await update.message.reply_text(final_text)
     elif message_data['type'] == 'video_note':
         # Для видеосообщения отправляем сначала видеосообщение
         await update.message.reply_video_note(
             video_note=message_data['file_id']
         )
-        # Затем отправляем подпись отдельным сообщением
+        # Затем отправляем подпись отдельным сообщением (просто текст без лишних слов)
         if final_text.strip():
-            await update.message.reply_text(f"Подпись к видеосообщению:\n\n{final_text}")
+            await update.message.reply_text(final_text)
 
 async def process_media_group(media_group_id: str, context: ContextTypes.DEFAULT_TYPE):
     """Обрабатывает собранную группу медиа"""
@@ -357,25 +379,7 @@ async def process_media_group(media_group_id: str, context: ContextTypes.DEFAULT
         )
         
         # Отправляем сообщение с подтверждением
-        keyboard = [
-            [
-                InlineKeyboardButton("Отправить", callback_data="confirm_send"),
-                InlineKeyboardButton("Отмена", callback_data="cancel_confirm")
-            ]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        confirmation_message = await context.bot.send_message(
-            chat_id=group_data['chat_id'],
-            text="Подтвердите отправку",
-            reply_markup=reply_markup
-        )
-        
-        # Устанавливаем таймер на 30 секунд
-        context.user_data['confirmation_message_id'] = confirmation_message.message_id
-        context.user_data['confirmation_chat_id'] = confirmation_message.chat_id
-        
-        asyncio.create_task(delete_after_timeout(context, 30))
+        await send_confirmation_from_context(context, group_data['chat_id'])
         
     except Exception as e:
         await context.bot.send_message(
@@ -385,6 +389,28 @@ async def process_media_group(media_group_id: str, context: ContextTypes.DEFAULT
     
     # Удаляем группу из временного хранилища
     del media_groups[media_group_id]
+
+async def send_confirmation_from_context(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+    """Отправляет подтверждение из контекста"""
+    keyboard = [
+        [
+            InlineKeyboardButton("Отправить", callback_data="confirm_send"),
+            InlineKeyboardButton("Отмена", callback_data="cancel_confirm")
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    confirmation_message = await context.bot.send_message(
+        chat_id=chat_id,
+        text="Подтвердите отправку",
+        reply_markup=reply_markup
+    )
+    
+    # Устанавливаем таймер на 30 секунд
+    context.user_data['confirmation_message_id'] = confirmation_message.message_id
+    context.user_data['confirmation_chat_id'] = confirmation_message.chat_id
+    
+    asyncio.create_task(delete_after_timeout(context, 30))
 
 async def handle_media_group(update: Update, context: ContextTypes.DEFAULT_TYPE, media_group_id: str):
     """Обработка группы медиа"""
@@ -529,50 +555,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }
         await handle_single_media(update, context, context.user_data['message_to_send'])
     
-    # Для одиночных сообщений отправляем подтверждение (кроме голосовых и видеосообщений, у них уже есть подпись)
-    if not message.media_group_id and message.content_type not in ['voice', 'video_note']:
-        keyboard = [
-            [
-                InlineKeyboardButton("Отправить", callback_data="confirm_send"),
-                InlineKeyboardButton("Отмена", callback_data="cancel_confirm")
-            ]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        confirmation_message = await message.reply_text(
-            "Подтвердите отправку",
-            reply_markup=reply_markup
-        )
-        
-        # Устанавливаем таймер на 30 секунд
-        context.user_data['confirmation_message_id'] = confirmation_message.message_id
-        context.user_data['confirmation_chat_id'] = confirmation_message.chat_id
-        
-        asyncio.create_task(delete_after_timeout(context, 30))
-    
-    # Для голосовых и видеосообщений отправляем подтверждение после подписи
-    elif not message.media_group_id and message.content_type in ['voice', 'video_note']:
-        # Ждем немного чтобы подпись успела отправиться
-        await asyncio.sleep(1)
-        
-        keyboard = [
-            [
-                InlineKeyboardButton("Отправить", callback_data="confirm_send"),
-                InlineKeyboardButton("Отмена", callback_data="cancel_confirm")
-            ]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        confirmation_message = await message.reply_text(
-            "Подтвердите отправку",
-            reply_markup=reply_markup
-        )
-        
-        # Устанавливаем таймер на 30 секунд
-        context.user_data['confirmation_message_id'] = confirmation_message.message_id
-        context.user_data['confirmation_chat_id'] = confirmation_message.chat_id
-        
-        asyncio.create_task(delete_after_timeout(context, 30))
+    # Для ВСЕХ типов сообщений отправляем подтверждение после предпросмотра
+    if not message.media_group_id:
+        # Ждем немного чтобы предпросмотр успел отправиться
+        await asyncio.sleep(0.5)
+        await send_confirmation(update, context)
 
 async def delete_after_timeout(context: ContextTypes.DEFAULT_TYPE, seconds: int):
     """Удаляет сообщение подтверждения после таймаута"""
