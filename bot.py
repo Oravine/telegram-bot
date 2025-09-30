@@ -150,17 +150,26 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         caption=message_data['text']
                     )
                 elif message_data['type'] == 'media_group':
-                    # Отправляем группу медиа
+                    # Отправляем группу медиа с подписью к первому элементу
+                    media_with_caption = message_data['media'].copy()
+                    if message_data['text']:
+                        # Создаем копию первого медиа с подписью
+                        first_media = media_with_caption[0]
+                        if isinstance(first_media, InputMediaPhoto):
+                            media_with_caption[0] = InputMediaPhoto(
+                                media=first_media.media,
+                                caption=message_data['text']
+                            )
+                        elif isinstance(first_media, InputMediaVideo):
+                            media_with_caption[0] = InputMediaVideo(
+                                media=first_media.media,
+                                caption=message_data['text']
+                            )
+                    
                     await context.bot.send_media_group(
                         chat_id=CHANNEL_ID,
-                        media=message_data['media']
+                        media=media_with_caption
                     )
-                    # Если есть отдельный текст, отправляем его как отдельное сообщение
-                    if message_data.get('text'):
-                        await context.bot.send_message(
-                            chat_id=CHANNEL_ID,
-                            text=message_data['text']
-                        )
                 
                 await query.edit_message_text("Сообщение успешно отправлено в канал!")
                 
@@ -216,7 +225,8 @@ async def handle_media_group(update: Update, context: ContextTypes.DEFAULT_TYPE,
             'media': [],
             'caption': '',
             'user_id': user_id,
-            'chat_id': update.message.chat_id
+            'chat_id': update.message.chat_id,
+            'processed': False
         }
     
     # Добавляем медиа в группу
@@ -234,55 +244,78 @@ async def handle_media_group(update: Update, context: ContextTypes.DEFAULT_TYPE,
     if update.message.caption and not media_groups[media_group_id]['caption']:
         media_groups[media_group_id]['caption'] = update.message.caption + footer_text
     
-    # Ждем 1 секунду, чтобы собрать все медиа группы
-    await asyncio.sleep(1)
+    # Если подписи нет, но есть медиа, добавляем только footer
+    if not media_groups[media_group_id]['caption'] and media_groups[media_group_id]['media']:
+        media_groups[media_group_id]['caption'] = footer_text.strip()
     
-    # Проверяем, собрали ли мы все медиа (это последнее сообщение в группе)
-    if len(media_groups[media_group_id]['media']) >= 2:  # Если есть хотя бы 2 медиа
-        group_data = media_groups[media_group_id]
+    # Ждем 2 секунды, чтобы собрать все медиа группы
+    await asyncio.sleep(2)
+    
+    # Проверяем, не обработали ли мы уже эту группу
+    if media_groups[media_group_id]['processed']:
+        return
+    
+    # Помечаем группу как обработанную
+    media_groups[media_group_id]['processed'] = True
+    
+    group_data = media_groups[media_group_id]
+    
+    # Подготавливаем данные для отправки
+    context.user_data['message_to_send'] = {
+        'type': 'media_group',
+        'media': group_data['media'],
+        'text': group_data['caption']
+    }
+    
+    # Отправляем предпросмотр пользователю
+    try:
+        # Создаем копию медиа с подписью для предпросмотра
+        preview_media = group_data['media'].copy()
+        if group_data['caption'] and preview_media:
+            first_media = preview_media[0]
+            if isinstance(first_media, InputMediaPhoto):
+                preview_media[0] = InputMediaPhoto(
+                    media=first_media.media,
+                    caption=group_data['caption']
+                )
+            elif isinstance(first_media, InputMediaVideo):
+                preview_media[0] = InputMediaVideo(
+                    media=first_media.media,
+                    caption=group_data['caption']
+                )
         
-        # Добавляем подпись к первому медиа
-        if group_data['caption'] and group_data['media']:
-            group_data['media'][0].caption = group_data['caption']
+        preview_messages = await context.bot.send_media_group(
+            chat_id=group_data['chat_id'],
+            media=preview_media
+        )
         
-        context.user_data['message_to_send'] = {
-            'type': 'media_group',
-            'media': group_data['media'],
-            'text': group_data['caption'] if group_data['caption'] else footer_text
-        }
-        
-        # Отправляем предпросмотр пользователю
-        try:
-            preview_messages = await context.bot.send_media_group(
-                chat_id=group_data['chat_id'],
-                media=group_data['media']
-            )
-            
-            # Отправляем сообщение с подтверждением
-            keyboard = [
-                [
-                    InlineKeyboardButton("Отправить", callback_data="confirm_send"),
-                    InlineKeyboardButton("Отмена", callback_data="cancel_confirm")
-                ]
+        # Отправляем сообщение с подтверждением
+        keyboard = [
+            [
+                InlineKeyboardButton("Отправить", callback_data="confirm_send"),
+                InlineKeyboardButton("Отмена", callback_data="cancel_confirm")
             ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            confirmation_message = await context.bot.send_message(
-                chat_id=group_data['chat_id'],
-                text="Подтвердите отправку",
-                reply_markup=reply_markup
-            )
-            
-            # Устанавливаем таймер на 30 секунд
-            context.user_data['confirmation_message_id'] = confirmation_message.message_id
-            context.user_data['confirmation_chat_id'] = confirmation_message.chat_id
-            
-            asyncio.create_task(delete_after_timeout(context, 30))
-            
-        except Exception as e:
-            await update.message.reply_text(f"Ошибка при создании предпросмотра: {str(e)}")
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
         
-        # Удаляем группу из временного хранилища
+        confirmation_message = await context.bot.send_message(
+            chat_id=group_data['chat_id'],
+            text="Подтвердите отправку",
+            reply_markup=reply_markup
+        )
+        
+        # Устанавливаем таймер на 30 секунд
+        context.user_data['confirmation_message_id'] = confirmation_message.message_id
+        context.user_data['confirmation_chat_id'] = confirmation_message.chat_id
+        
+        asyncio.create_task(delete_after_timeout(context, 30))
+        
+    except Exception as e:
+        await update.message.reply_text(f"Ошибка при создании предпросмотра: {str(e)}")
+    
+    # Удаляем группу из временного хранилища через 10 секунд
+    await asyncio.sleep(10)
+    if media_group_id in media_groups:
         del media_groups[media_group_id]
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
