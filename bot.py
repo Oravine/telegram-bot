@@ -220,7 +220,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.delete_message()
         await context.bot.send_message(
             chat_id=query.message.chat_id,
-            text="Отправка отменена"
+            text="Отправка сообщения отменена."
         )
         context.user_data.pop('waiting_for_message', None)
         
@@ -519,7 +519,7 @@ async def send_confirmation_from_context(context: ContextTypes.DEFAULT_TYPE, cha
     
     confirmation_message = await context.bot.send_message(
         chat_id=chat_id,
-        text="Подтвердите отправку",
+        text="Подтвердите отправку сообщения",
         reply_markup=reply_markup
     )
     
@@ -530,7 +530,7 @@ async def send_confirmation_from_context(context: ContextTypes.DEFAULT_TYPE, cha
 async def handle_media_group(update: Update, context: ContextTypes.DEFAULT_TYPE, media_group_id: str):
     """Обработка группы медиа"""
     user_id = context.user_data.get('bot_user_id')
-    footer_text = f"\n\n(Подслушано 1699)[https://Pod1699.t.me] | Сообщение отправлено пользователем [ID: {user_id}]"
+    footer_text = f"\n\n@Pod1699 | Сообщение отправлено пользователем [ID: {user_id}]"
     
     # Инициализируем группу, если ее еще нет
     if media_group_id not in media_groups:
