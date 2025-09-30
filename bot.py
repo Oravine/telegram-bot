@@ -4,9 +4,7 @@ import sqlite3
 from telegram import (
     Update, 
     InlineKeyboardButton, 
-    InlineKeyboardMarkup,
-    InputMediaPhoto,
-    InputMediaVideo
+    InlineKeyboardMarkup
 )
 from telegram.ext import (
     Application, 
@@ -134,20 +132,29 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         chat_id=CHANNEL_ID,
                         text=message_data['text']
                     )
-                elif message_data['type'] == 'media':
-                    media = []
-                    for media_item in message_data['media']:
-                        if media_item['type'] == 'photo':
-                            media.append(InputMediaPhoto(media_item['file_id']))
-                        elif media_item['type'] == 'video':
-                            media.append(InputMediaVideo(media_item['file_id']))
-                    
-                    if media:
-                        # Добавляем текст к первому медиа
-                        media[0].caption = message_data['text']
-                        await context.bot.send_media_group(
+                elif message_data['type'] == 'photo':
+                    await context.bot.send_photo(
+                        chat_id=CHANNEL_ID,
+                        photo=message_data['file_id'],
+                        caption=message_data['text']
+                    )
+                elif message_data['type'] == 'video':
+                    await context.bot.send_video(
+                        chat_id=CHANNEL_ID,
+                        video=message_data['file_id'],
+                        caption=message_data['text']
+                    )
+                elif message_data['type'] == 'media_group':
+                    # Для нескольких медиа используем медиагруппу
+                    await context.bot.send_media_group(
+                        chat_id=CHANNEL_ID,
+                        media=message_data['media']
+                    )
+                    # Если есть текст, отправляем его отдельным сообщением
+                    if message_data['text']:
+                        await context.bot.send_message(
                             chat_id=CHANNEL_ID,
-                            media=media
+                            text=message_data['text']
                         )
                 
                 await query.edit_message_text("Сообщение успешно отправлено в канал!")
@@ -193,41 +200,57 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Отправляем предпросмотр пользователю
         await message.reply_text(final_text)
         
-    elif message.photo or message.video:
-        # Сообщение с медиа
-        media_items = []
-        
-        if message.photo:
-            # Берем самую большую фотографию
-            photo = message.photo[-1]
-            media_items.append({
-                'type': 'photo',
-                'file_id': photo.file_id
-            })
-        elif message.video:
-            media_items.append({
-                'type': 'video', 
-                'file_id': message.video.file_id
-            })
-        
+    elif message.photo:
+        # Сообщение с фото
+        photo = message.photo[-1]  # Берем самую большую фотографию
         caption = message.caption if message.caption else ""
         final_text = caption + footer_text
         
         context.user_data['message_to_send'] = {
-            'type': 'media',
-            'text': final_text,
-            'media': media_items
+            'type': 'photo',
+            'file_id': photo.file_id,
+            'text': final_text
         }
         
         # Отправляем предпросмотр пользователю
-        if media_items[0]['type'] == 'photo':
+        await message.reply_photo(
+            photo=photo.file_id,
+            caption=final_text
+        )
+        
+    elif message.video:
+        # Сообщение с видео
+        caption = message.caption if message.caption else ""
+        final_text = caption + footer_text
+        
+        context.user_data['message_to_send'] = {
+            'type': 'video',
+            'file_id': message.video.file_id,
+            'text': final_text
+        }
+        
+        # Отправляем предпросмотр пользователю
+        await message.reply_video(
+            video=message.video.file_id,
+            caption=final_text
+        )
+        
+    elif message.media_group_id:
+        # Группа медиа (несколько фото/видео)
+        # Для простоты обработаем только первое медиа
+        if message.photo:
+            photo = message.photo[-1]
+            caption = message.caption if message.caption else ""
+            final_text = caption + footer_text
+            
+            context.user_data['message_to_send'] = {
+                'type': 'photo',
+                'file_id': photo.file_id,
+                'text': final_text
+            }
+            
             await message.reply_photo(
-                photo=media_items[0]['file_id'],
-                caption=final_text
-            )
-        else:
-            await message.reply_video(
-                video=media_items[0]['file_id'],
+                photo=photo.file_id,
                 caption=final_text
             )
     
