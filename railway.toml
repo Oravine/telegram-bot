@@ -1,0 +1,8 @@
+[build]
+builder = "NIXPACKS"
+
+[deploy]
+startCommand = "python bot.py"
+
+[build.environment]
+NIXPACKS_ENABLE_POETRY = "0"
