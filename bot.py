@@ -242,11 +242,9 @@ async def send_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=reply_markup
     )
     
-    # Устанавливаем таймер на 30 секунд
+    # Сохраняем ID сообщения с подтверждением (без таймера)
     context.user_data['confirmation_message_id'] = confirmation_message.message_id
     context.user_data['confirmation_chat_id'] = confirmation_message.chat_id
-    
-    asyncio.create_task(delete_after_timeout(context, 30))
 
 async def handle_single_media(update: Update, context: ContextTypes.DEFAULT_TYPE, message_data: dict):
     """Обработка одиночного медиа"""
@@ -278,20 +276,28 @@ async def handle_single_media(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
     elif message_data['type'] == 'voice':
         # Для голосового отправляем сначала голосовое
-        await update.message.reply_voice(
+        voice_message = await update.message.reply_voice(
             voice=message_data['file_id']
         )
-        # Затем отправляем подпись отдельным сообщением (просто текст без лишних слов)
+        # Затем отправляем подпись в ответ на голосовое сообщение
         if final_text.strip():
-            await update.message.reply_text(final_text)
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=final_text,
+                reply_to_message_id=voice_message.message_id
+            )
     elif message_data['type'] == 'video_note':
         # Для видеосообщения отправляем сначала видеосообщение
-        await update.message.reply_video_note(
+        video_note_message = await update.message.reply_video_note(
             video_note=message_data['file_id']
         )
-        # Затем отправляем подпись отдельным сообщением (просто текст без лишних слов)
+        # Затем отправляем подпись в ответ на видеосообщение
         if final_text.strip():
-            await update.message.reply_text(final_text)
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=final_text,
+                reply_to_message_id=video_note_message.message_id
+            )
 
 async def process_media_group(media_group_id: str, context: ContextTypes.DEFAULT_TYPE):
     """Обрабатывает собранную группу медиа"""
@@ -406,11 +412,9 @@ async def send_confirmation_from_context(context: ContextTypes.DEFAULT_TYPE, cha
         reply_markup=reply_markup
     )
     
-    # Устанавливаем таймер на 30 секунд
+    # Сохраняем ID сообщения с подтверждением (без таймера)
     context.user_data['confirmation_message_id'] = confirmation_message.message_id
     context.user_data['confirmation_chat_id'] = confirmation_message.chat_id
-    
-    asyncio.create_task(delete_after_timeout(context, 30))
 
 async def handle_media_group(update: Update, context: ContextTypes.DEFAULT_TYPE, media_group_id: str):
     """Обработка группы медиа"""
@@ -560,26 +564,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Ждем немного чтобы предпросмотр успел отправиться
         await asyncio.sleep(0.5)
         await send_confirmation(update, context)
-
-async def delete_after_timeout(context: ContextTypes.DEFAULT_TYPE, seconds: int):
-    """Удаляет сообщение подтверждения после таймаута"""
-    await asyncio.sleep(seconds)
-    
-    message_id = context.user_data.get('confirmation_message_id')
-    chat_id = context.user_data.get('confirmation_chat_id')
-    
-    if message_id and chat_id:
-        try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
-            await context.bot.send_message(chat_id=chat_id, text="Отменено. Время истекло (30 с.)")
-        except Exception as e:
-            print(f"Ошибка при удалении сообщения: {e}")
-    
-    # Очищаем данные
-    context.user_data.pop('message_to_send', None)
-    context.user_data.pop('waiting_for_message', None)
-    context.user_data.pop('confirmation_message_id', None)
-    context.user_data.pop('confirmation_chat_id', None)
 
 async def take_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /takedb для администратора"""
