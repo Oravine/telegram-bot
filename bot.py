@@ -4,7 +4,9 @@ import sqlite3
 from telegram import (
     Update, 
     InlineKeyboardButton, 
-    InlineKeyboardMarkup
+    InlineKeyboardMarkup,
+    InputMediaPhoto,
+    InputMediaVideo
 )
 from telegram.ext import (
     Application, 
@@ -22,6 +24,9 @@ CHANNEL_ID = os.getenv('CHANNEL_ID', '123456')
 
 # База данных
 DB_NAME = "users.db"
+
+# Глобальный словарь для хранения групп медиа
+media_groups = {}
 
 def init_db():
     """Инициализация базы данных"""
@@ -132,26 +137,26 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         chat_id=CHANNEL_ID,
                         text=message_data['text']
                     )
-                elif message_data['type'] == 'photo':
+                elif message_data['type'] == 'single_photo':
                     await context.bot.send_photo(
                         chat_id=CHANNEL_ID,
                         photo=message_data['file_id'],
                         caption=message_data['text']
                     )
-                elif message_data['type'] == 'video':
+                elif message_data['type'] == 'single_video':
                     await context.bot.send_video(
                         chat_id=CHANNEL_ID,
                         video=message_data['file_id'],
                         caption=message_data['text']
                     )
                 elif message_data['type'] == 'media_group':
-                    # Для нескольких медиа используем медиагруппу
+                    # Отправляем группу медиа
                     await context.bot.send_media_group(
                         chat_id=CHANNEL_ID,
                         media=message_data['media']
                     )
-                    # Если есть текст, отправляем его отдельным сообщением
-                    if message_data['text']:
+                    # Если есть отдельный текст, отправляем его как отдельное сообщение
+                    if message_data.get('text'):
                         await context.bot.send_message(
                             chat_id=CHANNEL_ID,
                             text=message_data['text']
@@ -176,6 +181,110 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop('message_to_send', None)
         context.user_data.pop('waiting_for_message', None)
 
+async def handle_single_media(update: Update, context: ContextTypes.DEFAULT_TYPE, message_data: dict):
+    """Обработка одиночного медиа"""
+    user_id = context.user_data.get('bot_user_id')
+    footer_text = f"\n\n(Подслушано 1699)[https://Pod1699.t.me] | Сообщение отправлено пользователем [ID: {user_id}]"
+    
+    caption = update.message.caption if update.message.caption else ""
+    final_text = caption + footer_text
+    
+    message_data.update({
+        'text': final_text
+    })
+    
+    # Отправляем предпросмотр пользователю
+    if message_data['type'] == 'single_photo':
+        await update.message.reply_photo(
+            photo=message_data['file_id'],
+            caption=final_text
+        )
+    elif message_data['type'] == 'single_video':
+        await update.message.reply_video(
+            video=message_data['file_id'],
+            caption=final_text
+        )
+
+async def handle_media_group(update: Update, context: ContextTypes.DEFAULT_TYPE, media_group_id: str):
+    """Обработка группы медиа"""
+    user_id = context.user_data.get('bot_user_id')
+    footer_text = f"\n\n(Подслушано 1699)[https://Pod1699.t.me] | Сообщение отправлено пользователем [ID: {user_id}]"
+    
+    # Инициализируем группу, если ее еще нет
+    if media_group_id not in media_groups:
+        media_groups[media_group_id] = {
+            'media': [],
+            'caption': '',
+            'user_id': user_id,
+            'chat_id': update.message.chat_id
+        }
+    
+    # Добавляем медиа в группу
+    if update.message.photo:
+        photo = update.message.photo[-1]
+        media_groups[media_group_id]['media'].append(
+            InputMediaPhoto(media=photo.file_id)
+        )
+    elif update.message.video:
+        media_groups[media_group_id]['media'].append(
+            InputMediaVideo(media=update.message.video.file_id)
+        )
+    
+    # Сохраняем подпись (берем из первого сообщения с подписью)
+    if update.message.caption and not media_groups[media_group_id]['caption']:
+        media_groups[media_group_id]['caption'] = update.message.caption + footer_text
+    
+    # Ждем 1 секунду, чтобы собрать все медиа группы
+    await asyncio.sleep(1)
+    
+    # Проверяем, собрали ли мы все медиа (это последнее сообщение в группе)
+    if len(media_groups[media_group_id]['media']) >= 2:  # Если есть хотя бы 2 медиа
+        group_data = media_groups[media_group_id]
+        
+        # Добавляем подпись к первому медиа
+        if group_data['caption'] and group_data['media']:
+            group_data['media'][0].caption = group_data['caption']
+        
+        context.user_data['message_to_send'] = {
+            'type': 'media_group',
+            'media': group_data['media'],
+            'text': group_data['caption'] if group_data['caption'] else footer_text
+        }
+        
+        # Отправляем предпросмотр пользователю
+        try:
+            preview_messages = await context.bot.send_media_group(
+                chat_id=group_data['chat_id'],
+                media=group_data['media']
+            )
+            
+            # Отправляем сообщение с подтверждением
+            keyboard = [
+                [
+                    InlineKeyboardButton("Отправить", callback_data="confirm_send"),
+                    InlineKeyboardButton("Отмена", callback_data="cancel_confirm")
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            confirmation_message = await context.bot.send_message(
+                chat_id=group_data['chat_id'],
+                text="Подтвердите отправку",
+                reply_markup=reply_markup
+            )
+            
+            # Устанавливаем таймер на 30 секунд
+            context.user_data['confirmation_message_id'] = confirmation_message.message_id
+            context.user_data['confirmation_chat_id'] = confirmation_message.chat_id
+            
+            asyncio.create_task(delete_after_timeout(context, 30))
+            
+        except Exception as e:
+            await update.message.reply_text(f"Ошибка при создании предпросмотра: {str(e)}")
+        
+        # Удаляем группу из временного хранилища
+        del media_groups[media_group_id]
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик сообщений от пользователя"""
     if not context.user_data.get('waiting_for_message'):
@@ -183,14 +292,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     user = update.effective_user
     message = update.message
-    user_id = context.user_data.get('bot_user_id')
     
-    # Формируем финальный текст
-    footer_text = f"\n\n(Подслушано 1699)[https://Pod1699.t.me] | Сообщение отправлено пользователем [ID: {user_id}]"
+    # Обрабатываем группы медиа
+    if message.media_group_id:
+        await handle_media_group(update, context, message.media_group_id)
+        return
     
-    # Обрабатываем разные типы сообщений
+    # Обрабатываем одиночные сообщения
     if message.text:
         # Текстовое сообщение
+        user_id = context.user_data.get('bot_user_id')
+        footer_text = f"\n\n(Подслушано 1699)[https://Pod1699.t.me] | Сообщение отправлено пользователем [ID: {user_id}]"
+        
         final_text = message.text + footer_text
         context.user_data['message_to_send'] = {
             'type': 'text',
@@ -201,78 +314,42 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text(final_text)
         
     elif message.photo:
-        # Сообщение с фото
-        photo = message.photo[-1]  # Берем самую большую фотографию
-        caption = message.caption if message.caption else ""
-        final_text = caption + footer_text
-        
+        # Одиночное фото
+        photo = message.photo[-1]
         context.user_data['message_to_send'] = {
-            'type': 'photo',
-            'file_id': photo.file_id,
-            'text': final_text
+            'type': 'single_photo',
+            'file_id': photo.file_id
         }
-        
-        # Отправляем предпросмотр пользователю
-        await message.reply_photo(
-            photo=photo.file_id,
-            caption=final_text
-        )
+        await handle_single_media(update, context, context.user_data['message_to_send'])
         
     elif message.video:
-        # Сообщение с видео
-        caption = message.caption if message.caption else ""
-        final_text = caption + footer_text
-        
+        # Одиночное видео
         context.user_data['message_to_send'] = {
-            'type': 'video',
-            'file_id': message.video.file_id,
-            'text': final_text
+            'type': 'single_video',
+            'file_id': message.video.file_id
         }
+        await handle_single_media(update, context, context.user_data['message_to_send'])
+    
+    # Для одиночных сообщений отправляем подтверждение
+    if not message.media_group_id:
+        keyboard = [
+            [
+                InlineKeyboardButton("Отправить", callback_data="confirm_send"),
+                InlineKeyboardButton("Отмена", callback_data="cancel_confirm")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
         
-        # Отправляем предпросмотр пользователю
-        await message.reply_video(
-            video=message.video.file_id,
-            caption=final_text
+        confirmation_message = await message.reply_text(
+            "Подтвердите отправку",
+            reply_markup=reply_markup
         )
         
-    elif message.media_group_id:
-        # Группа медиа (несколько фото/видео)
-        # Для простоты обработаем только первое медиа
-        if message.photo:
-            photo = message.photo[-1]
-            caption = message.caption if message.caption else ""
-            final_text = caption + footer_text
-            
-            context.user_data['message_to_send'] = {
-                'type': 'photo',
-                'file_id': photo.file_id,
-                'text': final_text
-            }
-            
-            await message.reply_photo(
-                photo=photo.file_id,
-                caption=final_text
-            )
-    
-    # Отправляем сообщение с подтверждением
-    keyboard = [
-        [
-            InlineKeyboardButton("Отправить", callback_data="confirm_send"),
-            InlineKeyboardButton("Отмена", callback_data="cancel_confirm")
-        ]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    confirmation_message = await message.reply_text(
-        "Подтвердите отправку",
-        reply_markup=reply_markup
-    )
-    
-    # Устанавливаем таймер на 30 секунд
-    context.user_data['confirmation_message_id'] = confirmation_message.message_id
-    context.user_data['confirmation_chat_id'] = confirmation_message.chat_id
-    
-    asyncio.create_task(delete_after_timeout(context, 30))
+        # Устанавливаем таймер на 30 секунд
+        context.user_data['confirmation_message_id'] = confirmation_message.message_id
+        context.user_data['confirmation_chat_id'] = confirmation_message.chat_id
+        
+        asyncio.create_task(delete_after_timeout(context, 30))
 
 async def delete_after_timeout(context: ContextTypes.DEFAULT_TYPE, seconds: int):
     """Удаляет сообщение подтверждения после таймаута"""
