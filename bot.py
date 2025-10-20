@@ -21,8 +21,8 @@ from telegram.ext import (
 
 # Конфигурация из переменных окружения
 BOT_TOKEN = os.getenv('BOT_TOKEN')
-ADMIN_ID = int(os.getenv('ADMIN_ID', '5466865775'))
-CHANNEL_ID = os.getenv('CHANNEL_ID', '123456')
+ADMIN_ID = int(os.getenv('ADMIN_ID'))
+CHANNEL_ID = os.getenv('CHANNEL_ID')
 
 # База данных
 DB_NAME = "users.db"
@@ -360,7 +360,7 @@ async def send_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_single_media(update: Update, context: ContextTypes.DEFAULT_TYPE, message_data: dict):
     """Обработка одиночного медиа"""
     user_id = context.user_data.get('bot_user_id')
-    footer_text = f"\n\n(Подслушано 1699)[https://Pod1699.t.me] | Сообщение отправлено пользователем [ID: {user_id}]"
+    footer_text = f"\n\n@Pod1699 | Сообщение отправлено пользователем [ID: {user_id}]"
     
     caption = update.message.caption if update.message.caption else ""
     final_text = caption + footer_text
