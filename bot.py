@@ -618,7 +618,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if message.text:
         # Текстовое сообщение
         user_id = context.user_data.get('bot_user_id')
-        footer_text = f"\n\n(Подслушано 1699)[https://Pod1699.t.me] | Сообщение отправлено пользователем [ID: {user_id}]"
+        footer_text = f"\n\n@Pod1699 | Сообщение отправлено пользователем [ID: {user_id}]"
         
         final_text = message.text + footer_text
         context.user_data['message_to_send'] = {
